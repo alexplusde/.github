@@ -29,7 +29,7 @@ Das sagen Kunden über die Zusammenarbeit:
 
 Weitere Informationen auch unter <https://www.alexplus.de/redaxo-addons>
 
-[![Add-on Übersicht](https://github.com/user-attachments/assets/89c5fca5-cc40-41d7-92d1-6e3fdbd34de5)](https://www.alexplus.de/redaxo-addons)
+[![Add-on Übersicht](https://github.com/user-attachments/assets/05224123-2652-4b58-b7e6-0582b342d81c)](https://www.alexplus.de/redaxo-addons)
 
 ... und viele weitere Addons unter <https://redaxo.org/download/addons/>, hier auf GitHub <https://github.com/orgs/alexplusde/repositories> und im REDAXO Installer.
 
