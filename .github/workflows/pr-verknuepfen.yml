@@ -1,0 +1,99 @@
+# Wiederverwendbarer Workflow für alle Repos in alexplusde – liegt in alexplusde/.github,
+# Quelle: Wissens-Repo › Lieferanten/GitHub/workflows/, verteilt mit scripts/Sync-GitHubStandards.ps1 -Nur Workflow.
+#
+# Pull Request: übernimmt Labels und Meilenstein der verknüpften Issues („Closes #12“, „Refs #12“, „Teil von #12“, „(#12)“ im Titel),
+# warnt ohne Issue. Fügt nur hinzu, entfernt nichts; ein am PR gesetzter Meilenstein bleibt.
+# Issue geschlossen (erledigt) im Meilenstein „Auf Stundenbasis“: Label „noch nicht abgerechnet“ bis zur Quartalsabrechnung.
+name: PR verknüpfen
+
+on:
+  workflow_call:
+    inputs:
+      ausnahmen:
+        description: Labels, die nicht vom Issue auf den PR übernommen werden (kommagetrennt)
+        type: string
+        default: 'Idee,zurückgestellt,Besprechung,wartet auf Freigabe,noch nicht abgerechnet'
+      stunden-meilenstein:
+        description: Meilenstein für Abrechnung nach Aufwand
+        type: string
+        default: 'Auf Stundenbasis'
+
+jobs:
+  verknuepfen:
+    if: github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/github-script@v7
+        env:
+          AUSNAHMEN: ${{ inputs.ausnahmen }}
+          STUNDEN_MEILENSTEIN: ${{ inputs.stunden-meilenstein }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const ausnahmen = new Set(process.env.AUSNAHMEN.split(',').map(s => s.trim()).filter(Boolean));
+            const stunden = process.env.STUNDEN_MEILENSTEIN;
+
+            if (context.eventName === 'issues') {
+              const issue = context.payload.issue;
+              if (issue.pull_request || issue.state_reason !== 'completed') return;
+              if (issue.milestone?.title !== stunden) return;
+              const labels = issue.labels.map(l => l.name);
+              if (labels.includes('intern') || labels.includes('noch nicht abgerechnet')) return;
+              await github.rest.issues.addLabels({ owner, repo, issue_number: issue.number, labels: ['noch nicht abgerechnet'] });
+              core.notice(`#${issue.number}: „noch nicht abgerechnet“ gesetzt (${stunden}).`);
+              return;
+            }
+
+            const pr = context.payload.pull_request;
+            if (!pr) return;
+            const antwort = await github.graphql(`query($owner: String!, $repo: String!, $n: Int!) {
+              repository(owner: $owner, name: $repo) { pullRequest(number: $n) {
+                labels(first: 50) { nodes { name } }
+                milestone { number }
+                closingIssuesReferences(first: 20) { nodes {
+                  number repository { nameWithOwner }
+                  labels(first: 50) { nodes { name } } milestone { number title }
+                } }
+              } } }`, { owner, repo, n: pr.number });
+            const aktuell = antwort.repository.pullRequest;
+            const issues = aktuell.closingIssuesReferences.nodes
+              .filter(i => i.repository.nameWithOwner === `${owner}/${repo}`)
+              .map(i => ({ number: i.number, labels: i.labels.nodes.map(l => l.name), milestone: i.milestone }));
+
+            // Teilbezüge ohne Schließen: „Refs #12“, „Teil von #12“, „Siehe #12“ im Text, „… (#12)“ im Titel
+            const nummern = new Set(issues.map(i => i.number));
+            const bezuege = [...(pr.body || '').matchAll(/(?:refs?|teil von|siehe)\s*:?\s+#(\d+)/gi), ...(pr.title || '').matchAll(/#(\d+)/g)];
+            for (const m of bezuege) {
+              const n = Number(m[1]);
+              if (nummern.has(n)) continue;
+              nummern.add(n);
+              try {
+                const { data } = await github.rest.issues.get({ owner, repo, issue_number: n });
+                if (!data.pull_request) issues.push({ number: n, labels: data.labels.map(l => l.name), milestone: data.milestone });
+              } catch { core.warning(`#${n} nicht gefunden.`); }
+            }
+
+            if (!issues.length) {
+              core.warning(`PR #${pr.number} ist mit keinem Issue verknüpft – im Text „Closes #<Nr>“ oder „Refs #<Nr>“ ergänzen.`);
+              return;
+            }
+
+            const vorhanden = new Set(aktuell.labels.nodes.map(l => l.name));
+            const neu = [...new Set(issues.flatMap(i => i.labels))].filter(l => !ausnahmen.has(l) && !vorhanden.has(l));
+            if (neu.length) {
+              await github.rest.issues.addLabels({ owner, repo, issue_number: pr.number, labels: neu });
+              core.notice(`Labels übernommen: ${neu.join(', ')}`);
+            }
+
+            if (!aktuell.milestone) {
+              const meilensteine = [...new Map(issues.filter(i => i.milestone).map(i => [i.milestone.number, i.milestone])).values()];
+              if (meilensteine.length === 1) {
+                await github.rest.issues.update({ owner, repo, issue_number: pr.number, milestone: meilensteine[0].number });
+                core.notice(`Meilenstein übernommen: ${meilensteine[0].title}`);
+              } else if (meilensteine.length > 1) {
+                core.warning(`Issues liegen in mehreren Meilensteinen (${meilensteine.map(m => m.title).join(', ')}) – PR aufteilen oder Meilenstein von Hand setzen.`);
+              } else {
+                core.warning(`Verknüpfte Issues (${issues.map(i => '#' + i.number).join(', ')}) haben keinen Meilenstein.`);
+              }
+            }
