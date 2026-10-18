@@ -39,7 +39,7 @@ jobs:
               if (issue.pull_request || issue.state_reason !== 'completed') return;
               if (issue.milestone?.title !== stunden) return;
               const labels = issue.labels.map(l => l.name);
-              if (labels.includes('intern') || labels.includes('noch nicht abgerechnet')) return;
+              if (['nicht abrechenbar', 'intern', 'noch nicht abgerechnet'].some(l => labels.includes(l))) return;
               await github.rest.issues.addLabels({ owner, repo, issue_number: issue.number, labels: ['noch nicht abgerechnet'] });
               core.notice(`#${issue.number}: „noch nicht abgerechnet“ gesetzt (${stunden}).`);
               return;
