@@ -1,0 +1,180 @@
+# Wiederverwendbarer Workflow für die REDAXO-Add-ons in alexplusde – liegt in alexplusde/.github,
+# Quelle: Wissens-Repo › Lieferanten/GitHub/workflows/, verteilt mit scripts/Sync-GitHubStandards.ps1 -Nur Workflow.
+#
+# Job php-cs-fixer: prüft den Code-Style nach dem REDAXO-Standard (redaxo/php-cs-fixer-config), nur Dry-Run –
+#   keine Bot-Commits. Befunde erscheinen als Annotationen im PR; Korrektur lokal mit `composer cs-fix`
+#   (oder `php-cs-fixer fix --config=.php-cs-fixer.dist.php`). Braucht im Add-on nur .php-cs-fixer.dist.php.
+# Job rexstan: lädt das aktuelle REDAXO 5, installiert das Add-on samt der in package.yml verlangten Add-ons und
+#   lässt rexstan (phpstan für REDAXO) laufen. Standard: nur melden (continue-on-error), Ergebnis in der Job-Zusammenfassung.
+#   Mit rexstan-blockierend: true wird der PR bei Befunden rot. Zusatzregeln je Add-on optional in .tools/rexstan.neon.
+name: Add-on prüfen
+
+on:
+  workflow_call:
+    inputs:
+      php-version:
+        description: PHP-Version für beide Jobs
+        type: string
+        default: '8.4'
+      addon-key:
+        description: Add-on-Key, wenn er vom Repo-Namen abweicht
+        type: string
+        default: ''
+      rexstan:
+        description: rexstan ausführen
+        type: boolean
+        default: true
+      rexstan-level:
+        description: phpstan-Level (0–9)
+        type: string
+        default: '5'
+      rexstan-blockierend:
+        description: Befunde lassen den Workflow scheitern
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  php-cs-fixer:
+    name: PHP-CS-Fixer
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: PHP einrichten
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ inputs.php-version }}
+          coverage: none
+          tools: cs2pr
+
+      # Werkzeuge global, nicht aus dem Add-on: Add-ons mit eingechecktem vendor/ (Laufzeit-Abhängigkeiten) bleiben unberührt
+      - name: PHP-CS-Fixer mit REDAXO-Regeln bereitstellen
+        run: |
+          composer global require --no-interaction --no-progress --quiet redaxo/php-cs-fixer-config
+          echo "$(composer global config bin-dir --absolute --quiet)" >> "$GITHUB_PATH"
+
+      - name: Code-Style prüfen
+        env:
+          PHP_CS_FIXER_IGNORE_ENV: 1
+        run: |
+          if [ ! -f .php-cs-fixer.dist.php ]; then
+            echo "::error file=.php-cs-fixer.dist.php::Konfiguration fehlt – Vorlage: Wissens-Repo Lieferanten/GitHub/workflows/php-cs-fixer.dist.php"
+            exit 1
+          fi
+          php-cs-fixer fix --config=.php-cs-fixer.dist.php --dry-run --diff --format=checkstyle | cs2pr
+
+  rexstan:
+    name: rexstan
+    if: ${{ inputs.rexstan }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: ${{ !inputs.rexstan-blockierend }}
+    env:
+      ADDON_KEY: ${{ inputs.addon-key != '' && inputs.addon-key || github.event.repository.name }}
+      REXSTAN_LEVEL: ${{ inputs.rexstan-level }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: addon
+
+      - name: PHP einrichten
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ inputs.php-version }}
+          extensions: gd, intl, pdo_mysql, iconv
+          coverage: none
+
+      # Laufzeit-Abhängigkeiten des Add-ons (require), damit rexstan die Klassen kennt; Dev-Pakete nicht nötig
+      - name: Composer-Abhängigkeiten des Add-ons
+        if: hashFiles('addon/composer.json') != ''
+        run: composer install --working-dir=addon --no-dev --prefer-dist --no-progress --no-interaction || echo "::warning::composer install im Add-on fehlgeschlagen – rexstan läuft ohne vendor/"
+
+      - name: Aktuelles REDAXO 5 laden
+        run: |
+          TAG=$(curl -fsSL -H "Authorization: Bearer ${{ github.token }}" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/redaxo/redaxo/releases?per_page=50" \
+            | jq -r '[ .[] | select(.prerelease == false and .draft == false) | select(.tag_name | test("^5\\.[0-9]+\\.[0-9]+$")) | .tag_name ] | first')
+          echo "REDAXO $TAG"
+          curl -fsSL -o redaxo.zip "https://github.com/redaxo/redaxo/releases/download/$TAG/redaxo_$TAG.zip"
+          unzip -oq redaxo.zip -d redaxo_cms
+          rm redaxo.zip
+
+      - name: Datenbank starten
+        run: |
+          sudo systemctl start mysql
+          mysql -uroot -h127.0.0.1 -proot -e 'CREATE DATABASE redaxo5;'
+
+      - name: REDAXO einrichten
+        working-directory: redaxo_cms
+        run: |
+          php redaxo/bin/console setup:run -n --lang=de_de --agree-license --db-host=127.0.0.1 --db-name=redaxo5 --db-password=root --db-createdb=no --db-setup=normal --admin-username=admin --admin-password=adminpassword --error-email=test@redaxo.invalid --ansi
+          php redaxo/bin/console config:set --type boolean debug.enabled true
+          php redaxo/bin/console config:set --type boolean debug.throw_always_exception true
+
+      # package.yml › requires › packages: verlangte Add-ons aus dem Installer laden (Plugins und Core-Add-ons scheitern folgenlos)
+      - name: Add-on und verlangte Add-ons installieren
+        working-directory: redaxo_cms
+        run: |
+          rsync -a --exclude='.git' --exclude='.github' "../addon/" "redaxo/src/addons/$ADDON_KEY/"
+          php redaxo/bin/console install:download rexstan '2.*'
+          php redaxo/bin/console package:install rexstan
+          for p in $(awk '
+            /^requires:/ { r = 1; next }
+            r && /^[^ \t]/ { r = 0 }
+            r && !pk && /^[ \t]+packages:[ \t]*$/ { match($0, /^[ \t]+/); ind = RLENGTH; pk = 1; next }
+            r && pk { match($0, /^[ \t]*/); if (RLENGTH <= ind) { pk = 0; next } if ($0 ~ /^[ \t]+[A-Za-z0-9_]+:/) { sub(/^[ \t]+/, ""); sub(/:.*/, ""); print } }
+          ' "redaxo/src/addons/$ADDON_KEY/package.yml"); do
+            php redaxo/bin/console install:download "$p" 2>/dev/null || echo "::notice::$p nicht geladen (Core-Add-on, Plugin oder nicht im Installer)"
+            php redaxo/bin/console package:install "$p" 2>/dev/null || true
+          done
+          php redaxo/bin/console package:install "$ADDON_KEY"
+
+      # Entspricht .tools/rexstan.php der FriendsOfREDAXO-Vorlage, nur zentral; .tools/rexstan.neon des Add-ons wird eingebunden, wenn vorhanden
+      - name: rexstan konfigurieren
+        working-directory: redaxo_cms
+        run: |
+          cat > rexstan-config.php <<'PHP'
+          <?php
+          unset($REX);
+          $REX['REDAXO'] = true;
+          $REX['HTDOCS_PATH'] = './';
+          $REX['BACKEND_FOLDER'] = 'redaxo';
+          $REX['LOAD_PAGE'] = false;
+          require './redaxo/src/core/boot.php';
+          require './redaxo/src/core/packages.php';
+
+          $addon = getenv('ADDON_KEY');
+          $base = '../../../../redaxo/src/addons/';
+          $includes = [
+              $base . 'rexstan/config/rex-superglobals.neon',
+              $base . 'rexstan/vendor/phpstan/phpstan/conf/bleedingEdge.neon',
+              $base . 'rexstan/vendor/phpstan/phpstan-deprecation-rules/rules.neon',
+              $base . 'rexstan/config/phpstan-dba.neon',
+              $base . 'rexstan/config/dead-code.neon',
+          ];
+          if (is_file('./redaxo/src/addons/' . $addon . '/.tools/rexstan.neon')) {
+              $includes[] = $base . $addon . '/.tools/rexstan.neon';
+          }
+          \rexstan\RexStanUserConfig::save((int) getenv('REXSTAN_LEVEL'), [$base . $addon . '/'], $includes, PHP_VERSION_ID);
+          echo "rexstan: Level " . getenv('REXSTAN_LEVEL') . ", PHP " . PHP_VERSION . ", Add-on $addon\n";
+          PHP
+          php rexstan-config.php
+
+      - name: rexstan ausführen
+        working-directory: redaxo_cms
+        run: |
+          set -o pipefail
+          php redaxo/bin/console rexstan:analyze -v 2>&1 | tee rexstan.txt
+          STATUS=${PIPESTATUS[0]}
+          {
+            echo "## rexstan – $ADDON_KEY (Level $REXSTAN_LEVEL)"
+            echo
+            echo '```'
+            tail -n 60 rexstan.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$STATUS"
