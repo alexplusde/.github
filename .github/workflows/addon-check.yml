@@ -115,22 +115,59 @@ jobs:
           php redaxo/bin/console config:set --type boolean debug.enabled true
           php redaxo/bin/console config:set --type boolean debug.throw_always_exception true
 
-      # package.yml › requires › packages: verlangte Add-ons aus dem Installer laden (Plugins und Core-Add-ons scheitern folgenlos)
+      # package.yml › requires › packages: verlangte Add-ons aus dem Installer laden.
+      # install:download ohne Version fragt interaktiv (bricht ab), und ein Constraint wie '2.*' trifft auch 3.0-beta (Vorabversion zählt als kleiner als 3.0).
+      # Deshalb wählt ein kleines PHP-Skript je Paket die neueste stabile Version, die den Constraint erfüllt (Core-Add-ons und Plugins: nur package:install).
       - name: Add-on und verlangte Add-ons installieren
         working-directory: redaxo_cms
         run: |
           rsync -a --exclude='.git' --exclude='.github' "../addon/" "redaxo/src/addons/$ADDON_KEY/"
-          php redaxo/bin/console install:download rexstan '2.*'
-          php redaxo/bin/console package:install rexstan
-          for p in $(awk '
-            /^requires:/ { r = 1; next }
-            r && /^[^ \t]/ { r = 0 }
-            r && !pk && /^[ \t]+packages:[ \t]*$/ { match($0, /^[ \t]+/); ind = RLENGTH; pk = 1; next }
-            r && pk { match($0, /^[ \t]*/); if (RLENGTH <= ind) { pk = 0; next } if ($0 ~ /^[ \t]+[A-Za-z0-9_]+:/) { sub(/^[ \t]+/, ""); sub(/:.*/, ""); print } }
-          ' "redaxo/src/addons/$ADDON_KEY/package.yml"); do
-            php redaxo/bin/console install:download "$p" 2>/dev/null || echo "::notice::$p nicht geladen (Core-Add-on, Plugin oder nicht im Installer)"
-            php redaxo/bin/console package:install "$p" 2>/dev/null || true
-          done
+          cat > installer-versionen.php <<'PHP'
+          <?php
+          unset($REX);
+          $REX['REDAXO'] = true;
+          $REX['HTDOCS_PATH'] = '../';
+          $REX['BACKEND_FOLDER'] = 'redaxo';
+          chdir(__DIR__ . '/redaxo');
+          require 'src/core/boot.php';
+          rex_addon::initialize(!rex::isSetup());
+          foreach (rex::getPackageOrder() as $packageId) {
+              rex_package::require($packageId)->enlist();
+          }
+          $config = rex_file::getConfig('src/addons/' . getenv('ADDON_KEY') . '/package.yml');
+          $requires = ['rexstan' => getenv('REXSTAN_VERSION') ?: '2.*'] + ($config['requires']['packages'] ?? []);
+          $available = rex_install_packages::getAddPackages();
+          foreach ($requires as $key => $constraint) {
+              $best = null;
+              if (!str_contains($key, '/') && isset($available[$key]['files'])) {
+                  foreach ($available[$key]['files'] as $file) {
+                      $version = (string) $file['version'];
+                      if (rex_version::isUnstable($version)) {
+                          continue;
+                      }
+                      try {
+                          if ('' !== trim((string) $constraint) && !rex_version::matchesConstraints($version, (string) $constraint)) {
+                              continue;
+                          }
+                      } catch (rex_exception) {
+                          // unbekannte Constraint-Schreibweise: jede stabile Version zulassen
+                      }
+                      if (null === $best || rex_version::compare($version, $best, '>')) {
+                          $best = $version;
+                      }
+                  }
+              }
+              echo $key, ' ', $best ?? '-', "\n";
+          }
+          PHP
+          php installer-versionen.php | tee installer-versionen.txt
+          while read -r p v; do
+            [ -n "$p" ] || continue
+            if [ "$v" != "-" ]; then
+              php redaxo/bin/console install:download "$p" "$v" || echo "::warning::$p $v konnte nicht geladen werden"
+            fi
+            php redaxo/bin/console package:install "$p" 2>/dev/null || echo "::notice::$p nicht installiert (Core-Add-on schon aktiv, Plugin oder nicht im Installer)"
+          done < installer-versionen.txt
           php redaxo/bin/console package:install "$ADDON_KEY"
 
       # Entspricht .tools/rexstan.php der FriendsOfREDAXO-Vorlage, nur zentral; .tools/rexstan.neon des Add-ons wird eingebunden, wenn vorhanden
