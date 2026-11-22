@@ -5,7 +5,7 @@
 #   keine Bot-Commits. Befunde erscheinen als Annotationen im PR; Korrektur lokal mit `composer cs-fix`
 #   (oder `php-cs-fixer fix --config=.php-cs-fixer.dist.php`). Braucht im Add-on nur .php-cs-fixer.dist.php.
 # Job rexstan: lädt das aktuelle REDAXO 5, installiert das Add-on samt der in package.yml verlangten Add-ons und
-#   lässt rexstan (phpstan für REDAXO) laufen. Standard: nur melden (continue-on-error), Ergebnis in der Job-Zusammenfassung.
+#   lässt rexstan (phpstan für REDAXO) laufen. Standard: nur melden (grüne Prüfung mit Warn-Annotation, Ergebnis in der Job-Zusammenfassung).
 #   Mit rexstan-blockierend: true wird der PR bei Befunden rot. Zusatzregeln je Add-on optional in .tools/rexstan.neon.
 name: Add-on prüfen
 
