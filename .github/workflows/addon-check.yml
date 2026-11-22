@@ -32,6 +32,10 @@ on:
         description: Befunde lassen den Workflow scheitern
         type: boolean
         default: false
+      rexstan-version:
+        description: "rexstan-Release von GitHub (Tag wie '3.0.37' oder 'latest'); der REDAXO-Installer führt nur 2.0.36 und 3.0-beta2, 2.x bringt psr/log v1 mit und scheitert an REDAXO ≥ 5.15"
+        type: string
+        default: latest
 
 permissions:
   contents: read
@@ -76,6 +80,8 @@ jobs:
     env:
       ADDON_KEY: ${{ inputs.addon-key != '' && inputs.addon-key || github.event.repository.name }}
       REXSTAN_LEVEL: ${{ inputs.rexstan-level }}
+      REXSTAN_VERSION: ${{ inputs.rexstan-version }}
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -122,6 +128,14 @@ jobs:
         working-directory: redaxo_cms
         run: |
           rsync -a --exclude='.git' --exclude='.github' "../addon/" "redaxo/src/addons/$ADDON_KEY/"
+          # rexstan vom GitHub-Release (Quell-Zip enthält vendor/): der Installer führt nur 2.0.36 (psr/log v1, Fatal mit REDAXO ≥ 5.15) und 3.0-beta2
+          tag="$REXSTAN_VERSION"
+          if [ "$tag" = latest ]; then tag=$(gh api repos/FriendsOfREDAXO/rexstan/releases/latest --jq .tag_name); fi
+          gh api "repos/FriendsOfREDAXO/rexstan/zipball/$tag" > rexstan.zip
+          rm -rf rexstan-src && mkdir rexstan-src && unzip -q rexstan.zip -d rexstan-src
+          mv rexstan-src/*/ "redaxo/src/addons/rexstan"
+          echo "rexstan $tag: $(grep -m1 '^version' redaxo/src/addons/rexstan/package.yml)"
+          php redaxo/bin/console package:install rexstan
           cat > installer-versionen.php <<'PHP'
           <?php
           unset($REX);
@@ -135,7 +149,7 @@ jobs:
               rex_package::require($packageId)->enlist();
           }
           $config = rex_file::getConfig('src/addons/' . getenv('ADDON_KEY') . '/package.yml');
-          $requires = ['rexstan' => getenv('REXSTAN_VERSION') ?: '2.*'] + ($config['requires']['packages'] ?? []);
+          $requires = $config['requires']['packages'] ?? [];
           $available = rex_install_packages::getAddPackages();
           foreach ($requires as $key => $constraint) {
               $best = null;
@@ -196,7 +210,8 @@ jobs:
           if (is_file('./redaxo/src/addons/' . $addon . '/.tools/rexstan.neon')) {
               $includes[] = $base . $addon . '/.tools/rexstan.neon';
           }
-          \rexstan\RexStanUserConfig::save((int) getenv('REXSTAN_LEVEL'), [$base . $addon . '/'], $includes, PHP_VERSION_ID);
+          // rexstan 3.x: Namespace FriendsOfRedaxo\RexStan (2.x hieß \rexstan)
+          \FriendsOfRedaxo\RexStan\RexStanUserConfig::save((int) getenv('REXSTAN_LEVEL'), [$base . $addon . '/'], $includes, PHP_VERSION_ID);
           echo "rexstan: Level " . getenv('REXSTAN_LEVEL') . ", PHP " . PHP_VERSION . ", Add-on $addon\n";
           PHP
           php rexstan-config.php
