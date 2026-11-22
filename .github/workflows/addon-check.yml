@@ -204,7 +204,8 @@ jobs:
               $base . 'rexstan/config/rex-superglobals.neon',
               $base . 'rexstan/vendor/phpstan/phpstan/conf/bleedingEdge.neon',
               $base . 'rexstan/vendor/phpstan/phpstan-deprecation-rules/rules.neon',
-              $base . 'rexstan/config/phpstan-dba.neon',
+              // phpstan-dba bewusst nicht: braucht eine Datenbankverbindung zur Laufzeit und bricht mit rexstan 3 im CI ab
+              // ("Internal error: DbSchemaResultCacheMetaExtension is not registered as a result cache value extension")
               $base . 'rexstan/config/dead-code.neon',
           ];
           if (is_file('./redaxo/src/addons/' . $addon . '/.tools/rexstan.neon')) {
