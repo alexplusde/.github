@@ -76,10 +76,10 @@ jobs:
     if: ${{ inputs.rexstan }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    continue-on-error: ${{ !inputs.rexstan-blockierend }}
     env:
       ADDON_KEY: ${{ inputs.addon-key != '' && inputs.addon-key || github.event.repository.name }}
       REXSTAN_LEVEL: ${{ inputs.rexstan-level }}
+      REXSTAN_BLOCKIEREND: ${{ inputs.rexstan-blockierend }}
       REXSTAN_VERSION: ${{ inputs.rexstan-version }}
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -219,9 +219,11 @@ jobs:
       - name: rexstan ausführen
         working-directory: redaxo_cms
         run: |
-          set -o pipefail
+          # GitHub startet run-Skripte mit bash -e: ein Fehlerstatus der Analyse darf das Skript nicht vor der Zusammenfassung beenden
+          set +e
           php redaxo/bin/console rexstan:analyze -v 2>&1 | tee rexstan.txt
           STATUS=${PIPESTATUS[0]}
+          set -e
           {
             echo "## rexstan – $ADDON_KEY (Level $REXSTAN_LEVEL)"
             echo
@@ -229,4 +231,10 @@ jobs:
             tail -n 60 rexstan.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-          exit "$STATUS"
+          if [ "$STATUS" -ne 0 ]; then
+            echo "::warning title=rexstan::Befunde für $ADDON_KEY (Level $REXSTAN_LEVEL) – Details in der Job-Zusammenfassung"
+            # Nur meldend: Prüfung bleibt grün (ein rot gemeldeter Job blockiert Merges trotz continue-on-error); blockierend: Fehlerstatus durchreichen
+            if [ "$REXSTAN_BLOCKIEREND" = "true" ]; then
+              exit "$STATUS"
+            fi
+          fi
